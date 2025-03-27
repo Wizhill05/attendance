@@ -6,8 +6,7 @@ import db from "./db.js";
 
 const app = express();
 const port = 5000;
-const JWT_SECRET = "your-secret-key"; // In production, use environment variable
-const SALT_ROUNDS = 10;
+const JWT_SECRET = "your-secret-key";
 
 app.use(cors());
 app.use(express.json());
@@ -30,9 +29,7 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
-// AUTH ENDPOINTS
-
-// Teacher Login
+// Login endpoint
 app.post("/api/auth/login", async (req, res) => {
   const { email, password } = req.body;
 
@@ -79,76 +76,44 @@ app.post("/api/auth/login", async (req, res) => {
   );
 });
 
-// Teacher Registration
-app.post("/api/auth/register", async (req, res) => {
-  const {
-    first_name,
-    last_name,
-    email,
-    password,
-    subject_specialization,
-    contact_number,
-  } = req.body;
+// Get today's completed classes
+app.get("/api/attendance/today/completed", authenticateToken, (req, res) => {
+  const today = new Date().toISOString().split("T")[0];
+  const query = `
+    SELECT DISTINCT schedule_id
+    FROM attendance
+    WHERE teacher_id = ? 
+    AND date = ?
+    GROUP BY schedule_id
+    HAVING COUNT(DISTINCT student_id) > 0
+  `;
 
-  if (!first_name || !last_name || !email || !password) {
-    return res.status(400).json({ error: "Required fields missing" });
-  }
-
-  try {
-    // Check if email already exists
-    db.get(
-      "SELECT email FROM teacher WHERE email = ?",
-      [email],
-      async (err, teacher) => {
-        if (err) {
-          return res.status(500).json({ error: err.message });
-        }
-        if (teacher) {
-          return res.status(400).json({ error: "Email already registered" });
-        }
-
-        // Hash password
-        const hashedPassword = await bcrypt.hash(password, SALT_ROUNDS);
-
-        // Insert new teacher
-        db.run(
-          `INSERT INTO teacher (first_name, last_name, email, password, subject_specialization, contact_number)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-          [
-            first_name,
-            last_name,
-            email,
-            hashedPassword,
-            subject_specialization,
-            contact_number,
-          ],
-          (err) => {
-            if (err) {
-              return res.status(500).json({ error: err.message });
-            }
-            res
-              .status(201)
-              .json({ message: "Teacher registered successfully" });
-          }
-        );
-      }
-    );
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  db.all(query, [req.teacher.id, today], (err, completed) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    res.json(completed);
+  });
 });
 
-// Get today's absences for the logged-in teacher
+// Get today's absences
 app.get("/api/attendance/today/absences", authenticateToken, (req, res) => {
   const today = new Date().toISOString().split("T")[0];
   const query = `
     SELECT DISTINCT 
+      a.attendance_id,
+      a.schedule_id,
       s.student_id,
       s.first_name,
       s.last_name,
+      s.roll_number,
       c.class_name,
+      c.class_id,
       sch.period_number,
-      a.status
+      sch.start_time,
+      sch.end_time,
+      a.status,
+      a.date
     FROM attendance a
     JOIN student s ON a.student_id = s.student_id
     JOIN schedule sch ON a.schedule_id = sch.schedule_id
@@ -167,36 +132,35 @@ app.get("/api/attendance/today/absences", authenticateToken, (req, res) => {
   });
 });
 
-// Get teacher's schedule
-app.get("/api/teachers/schedule", authenticateToken, (req, res) => {
+// Get absences for a specific date range
+app.get("/api/attendance/absences", authenticateToken, (req, res) => {
+  const { startDate, endDate } = req.query;
   const query = `
-    SELECT s.*, c.class_name, c.grade_level, c.section
-    FROM schedule s
+    SELECT DISTINCT 
+      a.attendance_id,
+      a.date,
+      s.student_id,
+      s.first_name,
+      s.last_name,
+      c.class_name,
+      sch.period_number,
+      a.status
+    FROM attendance a
+    JOIN student s ON a.student_id = s.student_id
+    JOIN schedule sch ON a.schedule_id = sch.schedule_id
     JOIN class c ON s.class_id = c.class_id
-    WHERE s.teacher_id = ?
-    ORDER BY s.day_of_week, s.period_number
+    WHERE a.teacher_id = ? 
+    AND a.date BETWEEN ? AND ?
+    AND a.status = 'Absent'
+    ORDER BY a.date DESC, sch.period_number, s.roll_number
   `;
 
-  db.all(query, [req.teacher.id], (err, schedule) => {
+  db.all(query, [req.teacher.id, startDate, endDate], (err, absences) => {
     if (err) {
       return res.status(500).json({ error: err.message });
     }
-    res.json(schedule);
+    res.json(absences);
   });
-});
-
-// Get students by class
-app.get("/api/classes/:id/students", authenticateToken, (req, res) => {
-  db.all(
-    "SELECT * FROM student WHERE class_id = ? ORDER BY roll_number",
-    [req.params.id],
-    (err, students) => {
-      if (err) {
-        return res.status(500).json({ error: err.message });
-      }
-      res.json(students);
-    }
-  );
 });
 
 // Get attendance for a specific schedule and date
@@ -217,6 +181,45 @@ app.get("/api/attendance/:schedule_id/:date", authenticateToken, (req, res) => {
         return res.status(500).json({ error: err.message });
       }
       res.json(attendance);
+    }
+  );
+});
+
+// Update attendance status
+app.put("/api/attendance/:attendance_id", authenticateToken, (req, res) => {
+  const { status } = req.body;
+  const { attendance_id } = req.params;
+
+  if (!status || !["Present", "Absent"].includes(status)) {
+    return res.status(400).json({ error: "Invalid status" });
+  }
+
+  // Verify teacher has access to this attendance record
+  db.get(
+    `SELECT a.* FROM attendance a
+     JOIN schedule s ON a.schedule_id = s.schedule_id
+     WHERE a.attendance_id = ? AND s.teacher_id = ?`,
+    [attendance_id, req.teacher.id],
+    (err, attendance) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+      if (!attendance) {
+        return res
+          .status(403)
+          .json({ error: "Unauthorized to update this attendance record" });
+      }
+
+      db.run(
+        "UPDATE attendance SET status = ? WHERE attendance_id = ?",
+        [status, attendance_id],
+        (err) => {
+          if (err) {
+            return res.status(500).json({ error: err.message });
+          }
+          res.json({ message: "Attendance updated successfully" });
+        }
+      );
     }
   );
 });
@@ -252,42 +255,87 @@ app.post("/api/attendance/mark", authenticateToken, (req, res) => {
         let success = true;
         let processed = 0;
 
-        // Process each attendance record
-        attendance_records.forEach((record) => {
-          const { student_id, status } = record;
-
-          db.run(
-            `INSERT OR REPLACE INTO attendance 
-             (student_id, schedule_id, date, status, teacher_id)
-             VALUES (?, ?, ?, ?, ?)`,
-            [student_id, schedule_id, date, status, req.teacher.id],
-            (err) => {
-              processed++;
-              if (err) {
-                success = false;
-              }
-
-              // If all records have been processed
-              if (processed === attendance_records.length) {
-                if (success) {
-                  db.run("COMMIT", (err) => {
-                    if (err) {
-                      return res.status(500).json({ error: err.message });
-                    }
-                    res.json({ message: "Attendance marked successfully" });
-                  });
-                } else {
-                  db.run("ROLLBACK", (err) => {
-                    return res
-                      .status(500)
-                      .json({ error: "Failed to mark attendance" });
-                  });
-                }
-              }
+        // First, delete any existing attendance records for this schedule and date
+        db.run(
+          "DELETE FROM attendance WHERE schedule_id = ? AND date = ?",
+          [schedule_id, date],
+          (err) => {
+            if (err) {
+              success = false;
+              db.run("ROLLBACK");
+              return res.status(500).json({ error: err.message });
             }
-          );
-        });
+
+            // Then insert new attendance records
+            attendance_records.forEach((record) => {
+              const { student_id, status } = record;
+
+              db.run(
+                `INSERT INTO attendance 
+                 (student_id, schedule_id, date, status, teacher_id)
+                 VALUES (?, ?, ?, ?, ?)`,
+                [student_id, schedule_id, date, status, req.teacher.id],
+                (err) => {
+                  processed++;
+                  if (err) {
+                    success = false;
+                  }
+
+                  // If all records have been processed
+                  if (processed === attendance_records.length) {
+                    if (success) {
+                      db.run("COMMIT", (err) => {
+                        if (err) {
+                          return res.status(500).json({ error: err.message });
+                        }
+                        res.json({ message: "Attendance marked successfully" });
+                      });
+                    } else {
+                      db.run("ROLLBACK", (err) => {
+                        return res
+                          .status(500)
+                          .json({ error: "Failed to mark attendance" });
+                      });
+                    }
+                  }
+                }
+              );
+            });
+          }
+        );
       });
+    }
+  );
+});
+
+// Get teacher's schedule
+app.get("/api/teachers/schedule", authenticateToken, (req, res) => {
+  const query = `
+    SELECT s.*, c.class_name, c.grade_level, c.section
+    FROM schedule s
+    JOIN class c ON s.class_id = c.class_id
+    WHERE s.teacher_id = ?
+    ORDER BY s.day_of_week, s.period_number
+  `;
+
+  db.all(query, [req.teacher.id], (err, schedule) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    res.json(schedule);
+  });
+});
+
+// Get students by class
+app.get("/api/classes/:id/students", authenticateToken, (req, res) => {
+  db.all(
+    "SELECT * FROM student WHERE class_id = ? ORDER BY roll_number",
+    [req.params.id],
+    (err, students) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+      res.json(students);
     }
   );
 });

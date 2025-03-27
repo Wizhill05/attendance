@@ -9,7 +9,7 @@ lerna-debug.log*
 
 server/node_modules
 server/package-lock.json
-server/school.db
+school.db
 
 node_modules
 dist

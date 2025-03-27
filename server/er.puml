@@ -1,0 +1,68 @@
+@startuml Student Attendance Management System Database Schema
+
+' Entity definitions
+entity "teacher" {
+  *teacher_id: INTEGER <<PK>>
+  --
+  *first_name: TEXT
+  *last_name: TEXT
+  *email: TEXT <<UNIQUE>>
+  *password: TEXT
+  contact_number: TEXT
+  subject_specialization: TEXT
+}
+
+entity "class" {
+  *class_id: INTEGER <<PK>>
+  --
+  *class_name: TEXT
+  *grade_level: TEXT
+  *section: TEXT
+  *academic_year: TEXT
+}
+
+entity "student" {
+  *student_id: INTEGER <<PK>>
+  --
+  *first_name: TEXT
+  *last_name: TEXT
+  *roll_number: TEXT <<UNIQUE>>
+  *class_id: INTEGER <<FK>>
+  email: TEXT
+  contact_number: TEXT
+  date_of_birth: DATE
+  gender: TEXT
+}
+
+entity "schedule" {
+  *schedule_id: INTEGER <<PK>>
+  --
+  *class_id: INTEGER <<FK>>
+  *teacher_id: INTEGER <<FK>>
+  *subject: TEXT
+  *period_number: INTEGER
+  *start_time: TIME
+  *end_time: TIME
+  *day_of_week: TEXT
+}
+
+entity "attendance" {
+  *attendance_id: INTEGER <<PK>>
+  --
+  *student_id: INTEGER <<FK>>
+  *schedule_id: INTEGER <<FK>>
+  *date: DATE
+  *status: TEXT
+  *teacher_id: INTEGER <<FK>>
+  remarks: TEXT
+}
+
+' Relationships
+teacher ||--o{ schedule : teaches
+class ||--o{ schedule : has_periods
+student }|--|| class : belongs_to
+student ||--o{ attendance : has
+teacher ||--o{ attendance : records
+schedule ||--o{ attendance : tracks
+
+@enduml
